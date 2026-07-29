@@ -87,6 +87,7 @@ public:
         Quantity GetRemainingQuantity() const {return remainingQuantity_;}
         Quantity GetFilledQuantity() const {return GetInitialQuantity() - GetRemainingQuantity();}
         bool IsFilled() const {return GetRemainingQuantity() == 0;}
+        
         // lowest quantity between two orders is the quantity that fills both orders because you can't overfill an order
         void Fill(Quantity quantity)
         {
@@ -95,6 +96,15 @@ public:
 
             remainingQuantity_ -= quantity;
         }
+
+        void SetRemainingQuantity(Quantity quantity)
+        {
+            if (quantity > GetRemainingQuantity())
+                throw std::logic_error("Cannot set remaining quantity above initial quantity");
+    
+            remainingQuantity_ = quantity;
+        }
+
 private:
     OrderType orderType_;
     OrderId orderId_;
@@ -336,6 +346,18 @@ public:
             return {};
         
         const auto [existingOrder, _] = orders_.at(order.GetOrderId());
+
+        bool samePrice = (existingOrder->GetPrice() == order.GetPrice());
+        bool sameQuantityOrLess = (existingOrder->GetRemainingQuantity() >= order.GetQuantity());
+
+        if (samePrice && sameQuantityOrLess)
+        {
+            existingOrder -> SetRemainingQuantity(order.GetQuantity());
+            // priority should be kept - same price and quantity or less
+            return {};
+        }   
+
+        // priority should be lost - price change or quantity increase
         CancelOrder(order.GetOrderId());
         return AddOrder(order.ToOrderPointer(existingOrder->GetOrderType()));
     }
