@@ -17,25 +17,20 @@
 #include <optional>
 #include <tuple>
 #include <format>
-#include <iostream>
 #include <map>
 #include <set>
 #include <deque>
 #include <queue>
 #include <stack>
 #include <limits>
-#include <numeric>
-#include <algorithm>
-#include <unordered_map>
-#include <memory>
-#include <variant>
-#include <optional>
-#include <tuple>
+#include <cassert>
 
 enum class OrderType
 {
     GoodTillCancel,
-    FillAndKill
+    FillAndKill,
+    FillOrKill,
+    Market
 };
 
 enum class Side
@@ -71,6 +66,7 @@ private:
     LevelInfos bids_;
     LevelInfos asks_;
 };
+
 class Order
 {
 public:
@@ -224,8 +220,8 @@ private:
             
             while (bids.size() && asks.size())
             {
-                auto& bid = bids.front();
-                auto& ask = asks.front();
+                auto bid = bids.front();
+                auto ask = asks.front();
 
                 Quantity quantity = std::min(bid -> GetRemainingQuantity(), ask -> GetRemainingQuantity());
 
@@ -244,12 +240,6 @@ private:
                     orders_.erase(ask->GetOrderId());
                 }
 
-                if (bids.empty())
-                    bids_.erase(bidPrice);
-                
-                if (asks.empty())
-                    asks_.erase(askPrice);
-
                 trades.push_back(Trade{ 
                     TradeInfo{bid->GetOrderId(), bid->GetPrice(), quantity},
                     TradeInfo{ask->GetOrderId(), ask->GetPrice(), quantity} // quantity can be part of constructor for trade object because its the same for both bid/ask
@@ -257,6 +247,13 @@ private:
                 });
 
             }
+
+
+            if (bids.empty())
+                bids_.erase(bidPrice);
+                
+            if (asks.empty())
+                asks_.erase(askPrice);
         }
 
         if (!bids_.empty())
@@ -294,13 +291,13 @@ public:
         {
             auto& orders = bids_[order->GetPrice()];
             orders.push_back(order);
-            iterator = std::next(orders.begin(), orders.size() - 1);
+            iterator = std::prev(orders.end());
         }
         else
         {
             auto& orders = asks_[order->GetPrice()];
             orders.push_back(order);
-            iterator = std::next(orders.begin(), orders.size() - 1);
+            iterator = std::prev(orders.end());
         }
 
         orders_.insert({order->GetOrderId(), OrderEntry{ order,iterator}});
@@ -329,7 +326,7 @@ public:
             auto& orders = bids_.at(price);
             orders.erase(iterator);
             if (orders.empty())
-                bids_.erase(price);bids_.erase(price);
+                bids_.erase(price);
         }
     }
 
@@ -338,7 +335,7 @@ public:
         if(!orders_.contains(order.GetOrderId()))
             return {};
         
-        const auto& [existingOrder, _] = orders_.at(order.GetOrderId());
+        const auto [existingOrder, _] = orders_.at(order.GetOrderId());
         CancelOrder(order.GetOrderId());
         return AddOrder(order.ToOrderPointer(existingOrder->GetOrderType()));
     }
@@ -368,19 +365,134 @@ public:
 
         return OrderbookLevelInfos{ bidInfos, askInfos };
     }
-        
+
+    const Order* GetOrder(OrderId orderId) const
+    {
+        if (!orders_.contains(orderId))
+            return nullptr;
+
+        return orders_.at(orderId).order_.get();
+    }
+
 };
 
 
+void PrintBook(const Orderbook& orderbook)
+{
+    const auto& orderInfos = orderbook.GetOrderInfos();
+
+    std::cout << "\n ===== Orderbook ===== \n Price | Quantity" << std::endl;
+
+    std::cout << "---- Asks ----" << std::endl;
+    for(const auto& level: orderInfos.GetAsks())
+    {
+        std::cout << level.price_ << "|" << level.quantity_ << std::endl;
+    }
+
+    std::cout << "---- Bids ----" << std::endl;
+    for(const auto& level: orderInfos.GetBids())
+    {
+        std::cout << level.price_ << "|" << level.quantity_ << std::endl;
+    }
+}
+
+
+void TestPartialFill()
+{
+    Orderbook orderbook;
+
+    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    //PrintBook(orderbook);
+    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 2, Side::Sell, 100, 4));
+    //PrintBook(orderbook);
+
+    assert(orderbook.Size() == 1); // buy order still resting, partially filled
+    std::cout << "\nTestPartialFill passed\n";
+}
+
+void TestFullFill()
+{
+    Orderbook orderbook;
+
+    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    //PrintBook(orderbook);
+    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 2, Side::Sell, 100, 10));
+    //PrintBook(orderbook); // should show full fill
+
+    assert(orderbook.Size() == 0); // order fully filled and removed
+    std::cout << "\nTestFullFill passed\n";
+
+}
+
+void TestFIFO()
+{
+    Orderbook orderbook;
+
+    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 2, Side::Buy, 100, 10));
+
+    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 3, Side::Sell, 100, 10));
+
+    //PrintBook(orderbook);
+
+    // order 1 should be matched first, order 2 should still be fully resting at 10
+    assert(orderbook.Size() == 1);
+    assert(orderbook.GetOrder(1) == nullptr);
+    assert(orderbook.GetOrder(2) != nullptr);
+    assert(orderbook.GetOrder(2) -> GetRemainingQuantity() == 10);
+
+    std::cout << "\nTestFIFO passed\n";
+}
+
+void TestCancel()
+{
+    Orderbook orderbook;
+
+    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    assert(orderbook.Size() == 1);
+
+    orderbook.CancelOrder(1);
+    assert(orderbook.Size() == 0);
+
+    std::cout << "\nTestCancel passed\n";
+}
+
+void TestPriority()
+{
+    Orderbook orderbook;
+
+    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 2, Side::Buy, 100, 10));
+
+    PrintBook(orderbook);
+
+    orderbook.MatchOrder(OrderModify(1, Side::Buy, 100, 5)); // change the quantity of order 1, same price, so it should still have the same priority
+
+    PrintBook(orderbook);
+
+    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 3, Side::Sell, 100, 5));
+    std::cout << (orderbook.GetOrder(1) ? "Order 1 exists" : "Order 1 does not exist") << std::endl;
+    std::cout << (orderbook.GetOrder(2) ? "Order 2 exists" : "Order 2 does not exist") << std::endl;
+
+    // order 1 should not exist because it should have been filled completely
+
+}
 
 int main() 
 {
     
-    Orderbook orderbook;
-    const OrderId orderId = 1;
-    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, orderId, Side::Buy, 100, 10));
-    std::cout << orderbook.Size() << std::endl; // 1
-    orderbook.CancelOrder(orderId);
-    std::cout << orderbook.Size() << std::endl; // 0
+    TestPartialFill();
+    TestFullFill();
+    TestFIFO();
+    TestCancel();
+    TestPriority();
     return 0;
 }
+
+/**
+ * to add:
+ * self-trade prevention
+ * market orders
+ * fillorkill order
+ * measure latency
+ */
