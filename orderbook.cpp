@@ -39,9 +39,18 @@ enum class Side
     Sell
 };
 
+enum class STPAction
+{
+    None,
+    CancelAggressive,
+    CancelPassive,
+    CancelBoth
+};
+
 using Price = std::int32_t; // prices can be negative
 using Quantity = std::uint32_t; // unsigned integer
 using OrderId = std::uint64_t; // unsigned integer
+using TraderId = std::uint64_t; // unsigned integer
 
 struct LevelInfo
 {
@@ -70,8 +79,10 @@ private:
 class Order
 {
 public:
-    Order(OrderType orderType, OrderId orderId, Side side, Price price, Quantity quantity)
-        : orderType_{orderType}
+    Order(TraderId traderId, STPAction stpAction, OrderType orderType, OrderId orderId, Side side, Price price, Quantity quantity)
+        : traderId_{traderId}
+        , stpAction_{stpAction}
+        , orderType_{orderType}
         , orderId_{orderId}
         , side_{side}
         , price_{price}
@@ -79,6 +90,8 @@ public:
         , remainingQuantity_{quantity} // to help us tell if its filled or not
         {}
 
+        TraderId GetTraderId() const {return traderId_;}
+        STPAction GetSTPAction() const {return stpAction_;}
         OrderId GetOrderId() const {return orderId_;}
         Side GetSide() const {return side_;}
         Price GetPrice() const {return price_;}
@@ -106,6 +119,8 @@ public:
         }
 
 private:
+    TraderId traderId_;
+    STPAction stpAction_;
     OrderType orderType_;
     OrderId orderId_;
     Side side_;
@@ -137,9 +152,9 @@ public:
 
     // converting given order into a new order
 
-    OrderPointer ToOrderPointer(OrderType type) const
+    OrderPointer ToOrderPointer(TraderId traderId, STPAction stpAction,OrderType type) const
     {
-        return std::make_shared<Order>(type,GetOrderId(), GetSide(), GetPrice(), GetQuantity());
+        return std::make_shared<Order>(traderId,stpAction,type, GetOrderId(), GetSide(), GetPrice(), GetQuantity());
     }
 
 private:
@@ -212,7 +227,7 @@ private:
         }
     }
 
-    Trades MatchOrders()
+    Trades MatchOrders(OrderPointer order)
     {
         Trades trades;
         trades.reserve(orders_.size());
@@ -233,6 +248,40 @@ private:
                 auto bid = bids.front();
                 auto ask = asks.front();
 
+
+                if (bid->GetTraderId() == ask->GetTraderId())
+                {
+                    STPAction action = order->GetSTPAction();
+
+                    switch(action)
+                    {
+                        case STPAction::None:
+                            break;
+
+                        case STPAction::CancelAggressive:
+                        {
+                            CancelOrder(order->GetOrderId());
+                            return trades;
+                        }   
+                        case STPAction::CancelPassive:
+                        {
+                            auto incomingorder = (order->GetSide() == Side::Buy ? ask->GetOrderId() : bid->GetOrderId());
+                            CancelOrder(incomingorder);
+                            break; // allows matches to continue (find matches that match incoming order)
+                        }
+
+                        case STPAction::CancelBoth:
+                        {
+                            CancelOrder(bid->GetOrderId());
+                            CancelOrder(ask->GetOrderId());
+                            return trades;
+                        }
+                    }
+                    if (order->GetSTPAction() != STPAction::None)
+                    {
+                        continue;
+                    }
+                }
                 Quantity quantity = std::min(bid -> GetRemainingQuantity(), ask -> GetRemainingQuantity());
 
                 bid->Fill(quantity);
@@ -311,7 +360,7 @@ public:
         }
 
         orders_.insert({order->GetOrderId(), OrderEntry{ order,iterator}});
-        return MatchOrders();
+        return MatchOrders(order);
     }
     
     void CancelOrder(OrderId orderId)
@@ -359,7 +408,11 @@ public:
 
         // priority should be lost - price change or quantity increase
         CancelOrder(order.GetOrderId());
-        return AddOrder(order.ToOrderPointer(existingOrder->GetOrderType()));
+        return AddOrder(order.ToOrderPointer(
+            existingOrder->GetTraderId(),
+            existingOrder->GetSTPAction(),
+            existingOrder->GetOrderType()
+        ));
     }
 
     std::size_t Size() const {return orders_.size();}
@@ -423,9 +476,9 @@ void TestPartialFill()
 {
     Orderbook orderbook;
 
-    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(1,STPAction::None,OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
     //PrintBook(orderbook);
-    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 2, Side::Sell, 100, 4));
+    orderbook.AddOrder(std::make_shared<Order>(2,STPAction::None,OrderType::GoodTillCancel, 2, Side::Sell, 100, 4));
     //PrintBook(orderbook);
 
     assert(orderbook.Size() == 1); // buy order still resting, partially filled
@@ -436,9 +489,9 @@ void TestFullFill()
 {
     Orderbook orderbook;
 
-    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(1, STPAction::None, OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
     //PrintBook(orderbook);
-    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 2, Side::Sell, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(2, STPAction::None, OrderType::GoodTillCancel, 2, Side::Sell, 100, 10));
     //PrintBook(orderbook); // should show full fill
 
     assert(orderbook.Size() == 0); // order fully filled and removed
@@ -450,10 +503,10 @@ void TestFIFO()
 {
     Orderbook orderbook;
 
-    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
-    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 2, Side::Buy, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(1, STPAction::None, OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(2, STPAction::None, OrderType::GoodTillCancel, 2, Side::Buy, 100, 10));
 
-    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 3, Side::Sell, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(3, STPAction::None, OrderType::GoodTillCancel, 3, Side::Sell, 100, 10));
 
     //PrintBook(orderbook);
 
@@ -470,7 +523,7 @@ void TestCancel()
 {
     Orderbook orderbook;
 
-    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(1, STPAction::None, OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
     assert(orderbook.Size() == 1);
 
     orderbook.CancelOrder(1);
@@ -483,8 +536,8 @@ void TestPriority()
 {
     Orderbook orderbook;
 
-    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
-    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 2, Side::Buy, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(1, STPAction::None, OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(2, STPAction::None, OrderType::GoodTillCancel, 2, Side::Buy, 100, 10));
 
     PrintBook(orderbook);
 
@@ -492,12 +545,25 @@ void TestPriority()
 
     PrintBook(orderbook);
 
-    orderbook.AddOrder(std::make_shared<Order>(OrderType::GoodTillCancel, 3, Side::Sell, 100, 5));
+    orderbook.AddOrder(std::make_shared<Order>(3, STPAction::None, OrderType::GoodTillCancel, 3, Side::Sell, 100, 5));
     std::cout << (orderbook.GetOrder(1) ? "Order 1 exists" : "Order 1 does not exist") << std::endl;
     std::cout << (orderbook.GetOrder(2) ? "Order 2 exists" : "Order 2 does not exist") << std::endl;
 
     // order 1 should not exist because it should have been filled completely
 
+}
+
+void TestSTP()
+{
+    Orderbook orderbook;
+
+    orderbook.AddOrder(std::make_shared<Order>(1, STPAction::CancelAggressive, OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(2, STPAction::None, OrderType::GoodTillCancel, 2, Side::Sell, 100, 10));
+
+    // order 1 should be canceled due to self-trade prevention
+    assert(orderbook.Size() == 0);
+
+    std::cout << "\nTestSTP passed\n";
 }
 
 int main() 
@@ -508,6 +574,7 @@ int main()
     TestFIFO();
     TestCancel();
     TestPriority();
+    TestSTP();
     return 0;
 }
 
