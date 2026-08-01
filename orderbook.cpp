@@ -227,140 +227,232 @@ private:
         }
     }
 
+    bool CanFullyFill(OrderType orderType,Side side, Price price, Quantity quantity) const
+    {
+        Quantity totalAmount = 0;
+        bool isMarket = (orderType == OrderType::Market);
+
+        if (side==Side::Buy)
+        {
+            for (const auto& [askPrice,asks] : asks_)
+            {
+                if (!isMarket && askPrice > price)
+                    break;
+                
+                for (const auto& ask : asks)
+                {
+                    totalAmount += ask -> GetRemainingQuantity();
+                    if (totalAmount >= quantity)
+                        return true;
+                }
+            }
+        }
+        else // side :: ask
+        {
+            for (const auto& [bidPrice,bids] : bids_)
+            {
+                if (!isMarket && bidPrice < price)
+                    break;
+
+                for (const auto& bid : bids)
+                {
+                    totalAmount += bid -> GetRemainingQuantity();
+                    if (totalAmount >= quantity)
+                        return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     Trades MatchOrders(OrderPointer order)
     {
         Trades trades;
         trades.reserve(orders_.size());
+
+        bool isMarket = (order->GetOrderType() == OrderType::Market);
         
-        while (true)
+        if (order->GetSide() == Side::Buy)
         {
-            if (bids_.empty() || asks_.empty())
-                break;
-            
-            auto& [bidPrice, bids] = *bids_.begin();
-            auto& [askPrice, asks] = *asks_.begin();
-
-            if (bidPrice < askPrice)
-                break;
-            
-            while (bids.size() && asks.size())
+            while (!asks_.empty() && order->GetRemainingQuantity() > 0)
             {
-                auto bid = bids.front();
-                auto ask = asks.front();
+                auto& [askPrice, asks] = *asks_.begin();
 
+                if (!isMarket && order->GetPrice() < askPrice) // If limit buy order and price is lower than best ask
+                    break;
 
-                if (bid->GetTraderId() == ask->GetTraderId())
+                bool resetRef = false;
+
+                while (!asks_.empty() && order->GetRemainingQuantity() > 0)
                 {
-                    STPAction action = order->GetSTPAction();
+                    auto ask = asks.front();
 
-                    switch(action)
+                    if (order->GetTraderId() == ask->GetTraderId())
                     {
-                        case STPAction::None:
-                            break;
+                        STPAction action = order->GetSTPAction();
 
-                        case STPAction::CancelAggressive:
+                        switch(action)
                         {
-                            CancelOrder(order->GetOrderId());
-                            return trades;
-                        }   
-                        case STPAction::CancelPassive:
-                        {
-                            auto incomingorder = (order->GetSide() == Side::Buy ? ask->GetOrderId() : bid->GetOrderId());
-                            CancelOrder(incomingorder);
-                            break; // allows matches to continue (find matches that match incoming order)
-                        }
+                            case STPAction::None:
+                                break;
 
-                        case STPAction::CancelBoth:
-                        {
-                            CancelOrder(bid->GetOrderId());
-                            CancelOrder(ask->GetOrderId());
-                            return trades;
+                            case STPAction::CancelAggressive:
+                            {
+                                order -> Fill(order->GetRemainingQuantity());
+                                return trades;
+                            }   
+                            case STPAction::CancelPassive:
+                            {
+                                CancelOrder(ask->GetOrderId());
+                                resetRef = true;
+                                break; // allows matches to continue (find matches that match incoming order)
+                            }
+
+                            case STPAction::CancelBoth:
+                            {
+                                CancelOrder(ask->GetOrderId());
+                                order -> Fill(order->GetRemainingQuantity());
+                                return trades;
+                            }
                         }
                     }
-                    if (order->GetSTPAction() != STPAction::None)
+
+                    Quantity quantity = std::min(order->GetRemainingQuantity(), ask->GetRemainingQuantity());
+
+                    order->Fill(quantity);
+                    ask -> Fill(quantity);
+
+                    if(ask->IsFilled())
                     {
-                        continue;
+                        asks.pop_front();
+                        orders_.erase(ask->GetOrderId());
                     }
+
+                    trades.push_back(Trade{ 
+                        TradeInfo{order->GetOrderId(), order->GetPrice(), quantity},
+                        TradeInfo{ask->GetOrderId(), ask->GetPrice(), quantity} 
+
+                    });
                 }
-                Quantity quantity = std::min(bid -> GetRemainingQuantity(), ask -> GetRemainingQuantity());
+                if (resetRef)
+                    continue;
 
-                bid->Fill(quantity);
-                ask->Fill(quantity);
-
-                if (bid->IsFilled())
+                if (asks_.empty())
                 {
-                    bids.pop_front();
-                    orders_.erase(bid->GetOrderId());
+                    asks_.erase(askPrice);
                 }
-
-                if (ask->IsFilled())
-                {
-                    asks.pop_front();
-                    orders_.erase(ask->GetOrderId());
-                }
-
-                trades.push_back(Trade{ 
-                    TradeInfo{bid->GetOrderId(), bid->GetPrice(), quantity},
-                    TradeInfo{ask->GetOrderId(), ask->GetPrice(), quantity} // quantity can be part of constructor for trade object because its the same for both bid/ask
-
-                });
-
             }
-
-
-            if (bids.empty())
-                bids_.erase(bidPrice);
-                
-            if (asks.empty())
-                asks_.erase(askPrice);
         }
-
-        if (!bids_.empty())
+        else
         {
-            auto& [_, bids] = *bids_.begin();
-            auto& order = bids.front();
-            if (order->GetOrderType() == OrderType::FillAndKill)
-                CancelOrder(order->GetOrderId());
-        }
+            while (!bids_.empty() && order->GetRemainingQuantity() > 0)
+            {
+                auto& [bidPrice, bids] = *bids_.begin();
 
-        if (!asks_.empty())
-        {
-            auto& [_, asks] = *asks_.begin();
-            auto& order = asks.front();
-            if (order->GetOrderType() == OrderType::FillAndKill)
-                CancelOrder(order->GetOrderId());
+                if (!isMarket && order->GetPrice() > bidPrice) // If limit sell order and price is higher than best bid
+                    break;
+
+                bool resetRef = false;
+
+                while (!bids_.empty() && order->GetRemainingQuantity() > 0)
+                {
+                    auto bid = bids.front();
+
+                    if (order->GetTraderId() == bid->GetTraderId())
+                    {
+                        STPAction action = order->GetSTPAction();
+
+                        switch(action)
+                        {
+                            case STPAction::None:
+                                break;
+
+                            case STPAction::CancelAggressive:
+                            {
+                                order -> Fill(order->GetRemainingQuantity());
+                                return trades;
+                            }
+                            case STPAction::CancelPassive:
+                            {
+                                CancelOrder(bid->GetOrderId());
+                                resetRef = true;
+                                break; // allows matches to continue (find matches that match incoming order)
+                            }
+
+                            case STPAction::CancelBoth:
+                            {
+                                CancelOrder(bid->GetOrderId());
+                                order -> Fill(order->GetRemainingQuantity());
+                                return trades;
+                            }
+                        }
+                    }
+
+                    Quantity quantity = std::min(order->GetRemainingQuantity(), bid->GetRemainingQuantity());
+
+                    order->Fill(quantity);
+                    bid->Fill(quantity);
+
+                    if (bid->IsFilled())
+                    {
+                        bids.pop_front();
+                        orders_.erase(bid->GetOrderId());
+                    }
+
+                    trades.push_back(Trade{
+                        TradeInfo{order->GetOrderId(), order->GetPrice(), quantity},
+                        TradeInfo{bid->GetOrderId(), bid->GetPrice(), quantity}
+
+                    });
+                }
+                if (resetRef)
+                    continue;
+
+                if (bids_.empty())
+                    bids_.erase(bidPrice);
+            }
         }
         return trades;
     }
-
 public:
 
     Trades AddOrder(OrderPointer order) 
     {
         // address exit conditions first
-        if (orders_.contains(order->GetOrderId()))
+        if (orders_.contains(order->GetOrderId())) //no duplicates
+            return {};
+
+
+        if (order->GetOrderType() == OrderType::FillOrKill && !CanFullyFill(order->GetOrderType(), order->GetSide(), order->GetPrice(), order->GetRemainingQuantity()))
             return {};
 
         if (order->GetOrderType() == OrderType::FillAndKill && !CanMatch(order->GetSide(), order->GetPrice()))
             return {};
 
-        OrderPointers::iterator iterator;
+        Trades trades = MatchOrders(order);
 
-        if (order->GetSide() == Side::Buy)
+        if (order->GetOrderType() == OrderType::GoodTillCancel && !order->IsFilled()) // can rest in orderbook
         {
-            auto& orders = bids_[order->GetPrice()];
-            orders.push_back(order);
-            iterator = std::prev(orders.end());
-        }
-        else
-        {
-            auto& orders = asks_[order->GetPrice()];
-            orders.push_back(order);
-            iterator = std::prev(orders.end());
+            OrderPointers::iterator iterator;
+
+            if (order->GetSide() == Side::Buy)
+            {
+                auto& orders = bids_[order->GetPrice()];
+                orders.push_back(order);
+                iterator = std::prev(orders.end());
+            }
+            else
+            {
+                auto& orders = asks_[order->GetPrice()];
+                orders.push_back(order);
+                iterator = std::prev(orders.end());
+            }
+
+            orders_.insert({order->GetOrderId(), OrderEntry{ order,iterator}});
         }
 
-        orders_.insert({order->GetOrderId(), OrderEntry{ order,iterator}});
-        return MatchOrders(order);
+        return trades;
     }
     
     void CancelOrder(OrderId orderId)
@@ -539,15 +631,18 @@ void TestPriority()
     orderbook.AddOrder(std::make_shared<Order>(1, STPAction::None, OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
     orderbook.AddOrder(std::make_shared<Order>(2, STPAction::None, OrderType::GoodTillCancel, 2, Side::Buy, 100, 10));
 
-    PrintBook(orderbook);
+    //PrintBook(orderbook);
 
     orderbook.MatchOrder(OrderModify(1, Side::Buy, 100, 5)); // change the quantity of order 1, same price, so it should still have the same priority
 
-    PrintBook(orderbook);
+    //PrintBook(orderbook);
 
     orderbook.AddOrder(std::make_shared<Order>(3, STPAction::None, OrderType::GoodTillCancel, 3, Side::Sell, 100, 5));
+
+    assert(orderbook.GetOrder(1) == nullptr);
+    std::cout << "\nTestPriority Passed\n";
     std::cout << (orderbook.GetOrder(1) ? "Order 1 exists" : "Order 1 does not exist") << std::endl;
-    std::cout << (orderbook.GetOrder(2) ? "Order 2 exists" : "Order 2 does not exist") << std::endl;
+    std::cout << (orderbook.GetOrder(2) ? "Order 2 exists" : "Order 2 does not exist\n") << std::endl;
 
     // order 1 should not exist because it should have been filled completely
 
@@ -566,6 +661,35 @@ void TestSTP()
     std::cout << "\nTestSTP passed\n";
 }
 
+void TestMarket()
+{
+    Orderbook orderbook;
+
+    orderbook.AddOrder(std::make_shared<Order>(1, STPAction::None, OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    orderbook.AddOrder(std::make_shared<Order>(2, STPAction::None, OrderType::Market, 2, Side::Sell, 100, 10));
+
+    // Market orders should match immediately
+    orderbook.MatchOrder(OrderModify(1, Side::Buy, 100, 10));
+
+    assert(orderbook.Size() == 0);
+    std::cout << "\nTestMarket passed\n";
+}
+
+void TestFillOrKill()
+{
+    Orderbook orderbook;
+
+    orderbook.AddOrder(std::make_shared<Order>(1, STPAction::None, OrderType::GoodTillCancel, 1, Side::Buy, 100, 10));
+    PrintBook(orderbook);
+    orderbook.AddOrder(std::make_shared<Order>(2, STPAction::None, OrderType::FillOrKill, 2, Side::Sell, 100, 8));
+
+    // Fill or Kill orders should match immediately or be canceled
+    orderbook.MatchOrder(OrderModify(1, Side::Buy, 100, 10));
+
+    assert(orderbook.Size() == 1);
+    std::cout << "\nTestFillOrKill passed\n";
+}
+
 int main() 
 {
     
@@ -575,13 +699,12 @@ int main()
     TestCancel();
     TestPriority();
     TestSTP();
+    TestMarket();
+    TestFillOrKill();
     return 0;
 }
 
 /**
  * to add:
- * self-trade prevention
- * market orders
- * fillorkill order
  * measure latency
  */
