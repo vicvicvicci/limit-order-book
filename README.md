@@ -10,7 +10,7 @@ Base implementation follows [this tutorial](https://youtu.be/XeLWe0Cx_Lg), cover
 Extended with:
 - [x] Tests 
 - [x] Self-Trade Prevention
-- [ ] FillOrKill order type
-- [ ] Market order type
+- [x] FillOrKill order type
+- [x] Market order type
 
 ## Design decisions
