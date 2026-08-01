@@ -8,6 +8,9 @@ Base implementation follows [this tutorial](https://youtu.be/XeLWe0Cx_Lg), cover
 - Partial fills
 
 Extended with:
+- [x] Tests 
+- [x] Self-Trade Prevention
 - [ ] FillOrKill order type
+- [ ] Market order type
 
 ## Design decisions
